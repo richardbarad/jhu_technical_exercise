@@ -1,0 +1,255 @@
+---
+title: "Technical_exercise"
+author: "Richard Barad"
+date: "2025-03-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(sf)
+library(tigris)
+library(tidyverse)
+library(tidycensus)
+library(readxl)
+library(ggspatial)
+library(scales)
+library(nngeo)
+library(gridExtra)
+library(corrr)
+```
+
+## Get Data
+
+
+```{r cars}
+
+data <- read_excel('Data exercise data.xlsx') %>%
+  dplyr::filter(State == 'Pennsylvania') %>%
+  dplyr::filter(County == 'Philadelphia County') %>%
+  rename(FIPS_Code = `FIPS Code`)
+  
+tracts <- tigris::tracts(state='PA', county='Philadelphia') %>%
+  left_join(data, join_by(GEOID == FIPS_Code)) %>%
+  st_transform("ESRI:102729") %>%
+  erase_water(area_threshold = 0.90)
+
+tracts$Population = as.numeric(tracts$Population)
+tracts$`Housing Units` = as.numeric(tracts$`Housing Units`)
+tracts$Households = as.numeric(tracts$Households)
+tracts$`Ppl Below 150% Poverty` = as.numeric(tracts$`Ppl Below 150% Poverty`)
+tracts$`BIPOC Residents` = as.numeric(tracts$`BIPOC Residents`)
+tracts$`Households with no vehicle` = as.numeric(tracts$`Households with no vehicle`)
+tracts$`Percent of Overcrowded Housing Units` = as.numeric(tracts$`Percent of Overcrowded Housing Units`)
+tracts$`People 25+ w/o high school diploma` = as.numeric(tracts$`People 25+ w/o high school diploma`)
+tracts <- tracts %>%
+  rename(Poverty = `Ppl Below 150% Poverty`,
+         `No vehicle` = `Households with no vehicle`,
+         `No diploma` = `People 25+ w/o high school diploma`,
+         `Overcrowded HUs` = `Percent of Overcrowded Housing Units`)
+
+```
+
+# Get Base Map Layers
+
+``` {r basemap stuff}
+
+nj <- zctas(state = "NJ", year = 2010) %>%
+  st_transform("ESRI:102729")
+
+pa <- zctas(state = "PA", year = 2010) %>%
+  st_transform("ESRI:102729")
+
+pa_nj <- rbind(nj, pa)
+
+base_state <- pa_nj %>%
+  st_make_valid() %>%
+  st_crop(xmin= 2650588, ymin= 194650.8, xmax= 2760108, ymax= 314963.8) %>%
+  erase_water(area_threshold = 0.91) %>%
+  st_union(by=STATEFP10)
+
+states <- tigris::states() %>%
+  dplyr::filter(STUSPS %in% c('PA','NJ')) %>%
+  st_transform("ESRI:102729") %>%
+  st_make_valid() %>%
+  st_crop(xmin= 2650588, ymin= 194650.8, xmax= 2760108, ymax= 314963.8)
+
+counties <- rbind(counties(state='PA'),counties(state='NJ')) %>%
+  st_transform("ESRI:102729") %>%
+  st_make_valid() %>%
+  st_crop(xmin= 2650588, ymin= 194650.8, xmax= 2760108, ymax= 314963.8)
+
+philadelphia <- counties %>%
+  dplyr::filter(NAME == 'Philadelphia')
+
+parks <- st_read('https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/PPR_Properties/FeatureServer/0/query?outFields=*&where=1%3D1&f=pgeojson') %>%
+  st_transform("ESRI:102729") %>%
+  dplyr::filter(Shape__Area > 100000) %>%
+  st_make_valid() %>%
+  st_remove_holes() %>%
+  st_intersection(philadelphia) %>%
+  st_union()
+        
+
+planning_districts <- st_read('https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/Planning_Districts/FeatureServer/0/query?outFields=*&where=1%3D1&f=pgeojson') %>%
+  st_transform("ESRI:102729")
+
+heat_vulnerability <- st_read('https://services.arcgis.com/fLeGjb7u4uXqeF9q/arcgis/rest/services/heat_vulnerability_ct/FeatureServer/0/query?outFields=*&where=1%3D1&f=pgeojson') %>%
+  st_transform("ESRI:102729") %>%
+  select(hei_score)
+
+tracts <- tracts %>%
+  st_centroid() %>%
+  st_join(.,heat_vulnerability,left=TRUE) %>%
+  st_drop_geometry() %>%
+  select('GEOID','hei_score') %>%
+  left_join(.,tracts,by='GEOID')
+
+tracts <- tracts %>%
+  st_as_sf()
+
+```
+
+## Make Maps
+
+```{r make_maps, echo=FALSE, fig.width=11}
+
+make_map <- function(variable,title,scale) { # create a function with the name my_function
+  ggplot()+
+  geom_rect(aes(xmin=2650588,xmax=2760108,ymin=194650.8,ymax=314963.8),fill='lightblue')+
+  geom_sf(data = base_state, fill= 'gray94',color = NA)+
+  geom_sf(data=tracts,aes(fill=.data[[variable]]),color='white',linewidth=0.1)+
+  geom_sf(data=parks,fill='#297700',color=NA,alpha=0.5)+
+  geom_sf(data=counties,color='gray70',fill=NA)+
+  geom_sf(data=states,color='gray10',fill=NA,linewidth=0.4)+
+  geom_sf(data=philadelphia,color='gray10',fill=NA,linewidth=0.4)+
+  geom_sf_text(data=counties %>% filter(NAME != 'Philadelphia'),aes(label=NAME),size=4,color='gray50')+
+  scale_fill_viridis_c(option=scale,na.value='grey70',name=title,direction=-1)+
+  theme_void()+
+  theme(
+    legend.position = c(0.74, 0.11),  # Keep legend in place
+    legend.title = element_text(size = 12),  # Adjust legend title size
+    legend.text = element_text(size = 12),  # Adjust legend text size
+    legend.title.position = 'top',
+    legend.key.width = unit('0.5','in'),
+    legend.direction = 'horizontal',
+  )+
+  annotation_scale(pad_x=unit(0.5,"in"),pad_y=unit(0.5,"in"))
+}
+
+map1 <- make_map('Poverty','Population Below \n150% Poverty','rocket')
+ggsave('poverty.png')
+map2 <- make_map('BIPOC Residents','BIPOC Residents','mako')
+ggsave('bipoc.png')
+map3 <- make_map('No vehicle','Households with \nNo Vehicle','magma')
+ggsave('no_vehicle.png')
+map4 <- make_map('No diploma','People 25+ w/o High \nSchool Diploma','plasma')
+ggsave('high_school_diploma.png')
+map5 <- make_map('Overcrowded HUs','% of Overcrowded \nHousing Units','inferno')
+ggsave('housing_units.png')
+map6 <- make_map('hei_score','Heat Exposure Index','inferno')
+ggsave('hei_score.png')
+
+
+grid.arrange(map1,map2,map3,nrow=1)
+
+m1 <- arrangeGrob(map1,map2,map3,nrow=1)
+
+ggsave('maps1.png',m1)
+
+```
+## Analysis By Region
+
+```{r region_analysis}
+
+DIST_NAME <- c("River Wards","North Delaware","Lower Far Northeast","Central","University Southwest","Upper Northwest","Upper North","South","North","Lower Northwest","Lower South","Lower Northeast","Central Northeast","West","Upper Far Northeast","Lower Southwest","West Park","Lower North")
+
+REGION <- c ("River Wards","Northeast","Northeast","Center City",'West','Northwest','Northwest','South','North','Northwest','South','Northeast','Northeast','West','Northeast','Southwest','West','North')
+
+regions <- data.frame(DIST_NAME,REGION)
+
+regions_gis <- left_join(planning_districts,regions,by='DIST_NAME') %>%
+  group_by(REGION) %>% summarise()
+
+tracts_m <- tracts %>%
+  st_centroid() %>%
+  st_join(regions_gis) %>%
+  st_drop_geometry() %>%
+  group_by(REGION) %>% summarise(BIPOC = sum(`BIPOC Residents`,na.rm=TRUE),
+                                    poverty = sum(Poverty,na.rm=TRUE),
+                                    no_vehicle = sum(`No vehicle`,na.rm=TRUE),
+                                    no_diploma = sum(`No diploma`,na.rm=TRUE),
+                                    overcrowded = mean(`Overcrowded HUs`,na.rm=TRUE),
+                                    hei_score = mean(hei_score,na.rm=TRUE)) %>%
+  drop_na() %>%
+  pivot_longer(cols = c('BIPOC','poverty','no_vehicle','no_diploma','no_diploma','overcrowded','hei_score'))
+
+ggplot()+
+  geom_rect(aes(xmin=2650588,xmax=2760108,ymin=194650.8,ymax=314963.8),fill='lightblue')+
+  geom_sf(data = base_state, fill= 'gray94',color = NA)+
+  geom_sf(data=philadelphia,fill='lightyellow',linewidth=0.4)+
+  geom_sf(data=parks,fill='#297700',color=NA,alpha=0.5)+
+  geom_sf(data=counties,color='gray70',fill=NA)+
+  geom_sf(data=states,color='gray10',fill=NA,linewidth=0.4)+
+  geom_sf_text(data=counties %>% filter(NAME != 'Philadelphia'),aes(label=NAME),size=2,color='gray50')+
+  geom_sf(data=regions_gis,fill=NA)+
+  geom_sf_text(data=regions_gis,aes(label=REGION),size=2)+
+  theme_void()
+
+ggsave('regions.png')
+
+options(scipen=10000)
+
+label_names <- c(
+                    `hei_score` = "Heat Score",
+                    `BIPOC` = "BPIOC Residents",
+                    `poverty` = "Population < 150% Poverty",
+                    `no_diploma` = "Pop 25+ w/o High School Diploma",
+                    `no_vehicle` = "Households With No Vehicle",
+                    `overcrowded` = "% of Overcrowded Housing Units"
+                    )
+
+ggplot()+
+  geom_bar(data=tracts_m,aes(x=REGION,y=value),fill='#f76f6f',stat='identity')+
+  facet_wrap(~name,scales="free",labeller = as_labeller(label_names))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  scale_y_continuous(labels = label_comma())
+
+ggsave('regions_bar.png')
+
+
+
+```
+
+
+```{r cluster_analysis}
+
+tracts_no_na <- tracts %>% 
+  select('hei_score','BIPOC Residents','Poverty','No diploma','No vehicle','Overcrowded HUs') %>%
+  drop_na()
+
+tracts_no_geom <- tracts_no_na %>%
+  st_drop_geometry()
+
+tracts_no_na %>% 
+  st_drop_geometry() %>%
+  correlate() %>% 
+  autoplot() +
+  geom_text(aes(label = round(r,digits=2)), size = 4, order = "hclust", type = "upper", tl.cex = 3)
+
+ggsave('correlation.png')
+
+```
+
+
+```{r scatter_plot}
+
+ggplot(data=tracts_no_na,aes(`BIPOC Residents`,`Poverty`))+
+  geom_point(size=1)+ 
+  geom_smooth(method = "lm")+
+  theme_bw()
+
+ggsave('scatter.png')
+
+```
+```
